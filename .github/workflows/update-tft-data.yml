@@ -1,0 +1,119 @@
+name: Update TFT Data
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # Quyền đọc và ghi nội dung repository
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Fetch Data from Worker
+        run: |
+          mkdir -p public/data/auto public/data/patch-notes
+
+          # Lấy danh sách key từ TFT_DATA
+          echo "Fetching list of keys from TFT_DATA..."
+          TFT_DATA_FILES=$(curl -X GET "https://patch-notes.hoquocdieu.workers.dev/list?namespace=TFT_DATA" | jq -r '.[]')
+
+          # Tải từng file từ TFT_DATA
+          for filename in $TFT_DATA_FILES; do
+            echo "Attempting to download $filename from TFT_DATA..."
+            curl -X GET "https://patch-notes.hoquocdieu.workers.dev/file?namespace=TFT_DATA&file=$filename" -o "public/data/auto/$filename" || echo "File $filename not found in TFT_DATA, skipping..."
+          done
+
+          # Lấy danh sách key từ PATCH_NOTES
+          echo "Fetching list of keys from PATCH_NOTES..."
+          PATCH_NOTES_FILES=$(curl -X GET "https://patch-notes.hoquocdieu.workers.dev/list?namespace=PATCH_NOTES" | jq -r '.[]')
+
+          # Tải từng file từ PATCH_NOTES
+          for filename in $PATCH_NOTES_FILES; do
+            echo "Attempting to download $filename from PATCH_NOTES..."
+            curl -X GET "https://patch-notes.hoquocdieu.workers.dev/file?namespace=PATCH_NOTES&file=$filename" -o "public/data/patch-notes/$filename" || echo "File $filename not found in PATCH_NOTES, skipping..."
+          done
+
+      - name: Validate JSON Files
+        run: |
+          # Validate file trong public/data/auto
+          for file in public/data/auto/*.json; do
+            if [ -f "$file" ]; then
+              if [ ! -s "$file" ]; then
+                echo "File $file is empty, removing..."
+                rm "$file"
+                continue
+              fi
+              jq . "$file" > /dev/null || { echo "Invalid JSON in $file, removing..."; rm "$file"; continue; }
+              if jq -e '.error' "$file" > /dev/null; then
+                echo "File $file contains an error, removing..."
+                rm "$file"
+              else
+                echo "Validated $file"
+              fi
+            fi
+          done
+
+          # Validate file trong public/data/patch-notes
+          for file in public/data/patch-notes/*.json; do
+            if [ -f "$file" ]; then
+              if [ ! -s "$file" ]; then
+                echo "File $file is empty, removing..."
+                rm "$file"
+                continue
+              fi
+              jq . "$file" > /dev/null || { echo "Invalid JSON in $file, removing..."; rm "$file"; continue; }
+              if jq -e '.error' "$file" > /dev/null; then
+                echo "File $file contains an error, removing..."
+                rm "$file"
+              else
+                echo "Validated $file"
+              fi
+            fi
+          done
+
+      - name: Commit Changes
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Unstaged changes detected, stashing them..."
+            git add .
+            git stash
+          fi
+
+          git pull origin main --rebase || { echo "Pull failed"; exit 1; }
+
+          if git stash list | grep -q "stash"; then
+            echo "Applying stashed changes..."
+            git stash pop || { echo "Stash pop failed, resolving conflicts may be needed"; exit 1; }
+          fi
+
+          echo "Git status before staging:"
+          git status
+
+          echo "Staging all changes, including deletions..."
+          git add -A
+
+          echo "Git status after staging:"
+          git status
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          echo "Committing changes..."
+          git commit -m "Update TFT data and patch notes on $(date +'%Y-%m-%d')"
+          git push
+
+          echo "Files in public/data after commit:"
+          ls -l public/data/auto/
+          ls -l public/data/patch-notes/
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
